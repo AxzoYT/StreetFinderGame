@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Street Finder: The Game</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #0b0c12;
+      color: #d8e4f0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    canvas#game {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-content: center;
+      text-align: center;
+      gap: 10px;
+      letter-spacing: 3px;
+      pointer-events: none;
+    }
+    #loading b { color: #00e5ff; font-size: 22px; }
+    #loading span { color: #7d899c; font-size: 13px; letter-spacing: 1px; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="loading">
+    <b>◆ STREET FINDER: THE GAME</b>
+    <span>Loading the game…</span>
+  </div>
+  <script type="module">
+    import init from "./street_finder_game.js";
+    init().catch((e) => {
+      document.querySelector("#loading span").textContent = "The game could not start: " + e;
+    });
+  </script>
+</body>
+</html>
