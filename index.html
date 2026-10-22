@@ -2,21 +2,56 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0c12">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Street Finder">
   <title>Street Finder: The Game</title>
   <style>
     html, body {
       margin: 0;
       height: 100%;
       overflow: hidden;
+      overscroll-behavior: none;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
       background: #0b0c12;
       color: #d8e4f0;
       font-family: "Segoe UI", system-ui, sans-serif;
     }
+    body { position: fixed; inset: 0; }
+    /* The area the game may draw in, kept clear of notches and home bars. */
+    #stage {
+      position: fixed;
+      top: env(safe-area-inset-top, 0px);
+      right: env(safe-area-inset-right, 0px);
+      bottom: env(safe-area-inset-bottom, 0px);
+      left: env(safe-area-inset-left, 0px);
+      overflow: hidden;
+    }
     canvas#game {
       display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
+      transform-origin: 0 0;
+      touch-action: none;
+      outline: none;
+    }
+    canvas#game.sliding { transition: transform 0.25s ease; }
+    /* eframe's hidden text input (for the on-screen keyboard) follows the
+       caret in unscaled pixels; pin it so focusing it never scrolls the page. */
+    #stage input {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
     }
     #loading {
       position: fixed;
@@ -25,22 +60,247 @@
       place-content: center;
       text-align: center;
       gap: 10px;
+      padding: 0 16px;
       letter-spacing: 3px;
       pointer-events: none;
     }
     #loading b { color: #00e5ff; font-size: 22px; }
     #loading span { color: #7d899c; font-size: 13px; letter-spacing: 1px; }
+
+    .tool {
+      position: fixed;
+      z-index: 2;
+      display: none;
+      min-width: 42px;
+      height: 42px;
+      padding: 0 12px;
+      border: 1px solid #1f6f7a;
+      border-radius: 10px;
+      background: rgba(11, 12, 18, 0.82);
+      color: #d8e4f0;
+      font: 600 15px "Segoe UI", system-ui, sans-serif;
+      letter-spacing: 0.5px;
+      touch-action: manipulation;
+      cursor: pointer;
+    }
+    .tool:active { background: #0b4f5a; }
+    .tool[aria-pressed="true"] { background: #ff2bd6; border-color: #ff2bd6; color: #0b0c12; }
+    body.ready .tool.on { display: block; }
+    #view-toggle {
+      top: calc(env(safe-area-inset-top, 0px) + 2px);
+      right: calc(env(safe-area-inset-right, 0px) + 4px);
+      height: 32px;
+      min-width: 0;
+      font-size: 13px;
+      border-color: #00e5ff;
+      color: #00e5ff;
+    }
+    #map-tools {
+      position: fixed;
+      z-index: 2;
+      right: calc(env(safe-area-inset-right, 0px) + 8px);
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+    }
+    body.ready #map-tools.on { display: flex; }
+    #map-tools .tool { position: static; display: block; }
+    #map-tools .tool[hidden] { display: none; }
+    #tip {
+      position: fixed;
+      z-index: 3;
+      left: 16px;
+      right: 16px;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 64px);
+      margin: 0 auto;
+      max-width: 360px;
+      padding: 10px 14px;
+      border: 1px solid #00e5ff;
+      border-radius: 10px;
+      background: rgba(11, 12, 18, 0.92);
+      color: #d8e4f0;
+      font-size: 14px;
+      line-height: 1.35;
+      text-align: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+    #tip.show { opacity: 1; }
   </style>
 </head>
 <body>
-  <canvas id="game"></canvas>
+  <div id="stage">
+    <canvas id="game"></canvas>
+  </div>
   <div id="loading">
     <b>◆ STREET FINDER: THE GAME</b>
     <span>Loading the game…</span>
   </div>
+  <button id="view-toggle" class="tool" type="button">Map ▸</button>
+  <div id="map-tools">
+    <button id="enter" class="tool" type="button" title="Acts like pressing Enter: next round">Enter</button>
+    <button id="zoom-in" class="tool" type="button" aria-label="Zoom in">+</button>
+    <button id="zoom-out" class="tool" type="button" aria-label="Zoom out">−</button>
+    <button id="ctrl" class="tool" type="button" aria-pressed="false" title="Acts like holding Ctrl: lasso another area without losing the first">Ctrl</button>
+    <button id="fullscreen" class="tool" type="button" aria-label="Full screen" hidden>⛶</button>
+  </div>
+  <div id="tip"></div>
   <script type="module">
     import init from "./street_finder_game.js";
-    init().catch((e) => {
+
+    // Width of the game's settings panel, in the game's own pixels.
+    const PANEL = 396;
+    // Below this width the panel and the map take turns on screen.
+    const NARROW = 600;
+    // Keep the canvas inside what mobile GPUs can reliably allocate.
+    const MAX_CANVAS_PIXELS = 4096;
+
+    const stage = document.getElementById("stage");
+    const canvas = document.getElementById("game");
+    const toggle = document.getElementById("view-toggle");
+    const mapTools = document.getElementById("map-tools");
+    const ctrlButton = document.getElementById("ctrl");
+    const fullscreenButton = document.getElementById("fullscreen");
+    const tip = document.getElementById("tip");
+    const touchScreen = window.matchMedia("(pointer: coarse)");
+
+    // Read by the patched street_finder_game.js on every input event.
+    const view = (globalThis.sfgView = { scale: 1, pixelRatio: 0, ctrl: false, narrow: false });
+    let showMap = false;
+    let canToggle = false;
+
+    // Narrow screens keep the canvas wide enough for the panel and a full
+    // screen of map, and slide it sideways to show one or the other. Wider
+    // screens show both, and widen the canvas only while the panel is hidden.
+    function gameWidth(width, scale, narrow) {
+      return (narrow || showMap ? PANEL : 0) + width / scale;
+    }
+
+    function layout(animate) {
+      const width = stage.clientWidth;
+      const height = stage.clientHeight;
+      if (!width || !height) return;
+      const narrow = width < NARROW;
+      // Scale the whole game down just enough that the panel leaves room for
+      // the map (or, on a narrow screen, that the panel fits on its own).
+      const scale = narrow
+        ? Math.min(1, width / (PANEL + 4))
+        : Math.max(0.62, Math.min(1, (0.45 * width) / PANEL));
+      canToggle = narrow || PANEL * scale > 0.3 * width;
+      if (!canToggle) showMap = false;
+
+      const w = gameWidth(width, scale, narrow);
+      const h = height / scale;
+      const dpr = window.devicePixelRatio || 1;
+      view.scale = scale;
+      view.narrow = narrow;
+      view.pixelRatio = Math.min(dpr * scale, MAX_CANVAS_PIXELS / Math.max(w, h));
+
+      canvas.classList.toggle("sliding", !!animate);
+      canvas.style.width = w + "px";
+      canvas.style.height = h + "px";
+      canvas.style.transform = `translateX(${showMap ? -PANEL * scale : 0}px) scale(${scale})`;
+
+      toggle.classList.toggle("on", canToggle);
+      toggle.textContent = showMap ? "☰ Menu" : "Map ▸";
+      // A mouse and keyboard need no stand-ins, so desktops look as before.
+      mapTools.classList.toggle("on", showMap || (!narrow && (canToggle || touchScreen.matches)));
+    }
+
+    function setShowMap(next) {
+      if (next === showMap || !canToggle) return;
+      showMap = next;
+      if (view.narrow) {
+        layout(true);
+      } else if (showMap) {
+        // Widen the canvas first so the map is already drawn as it slides in.
+        canvas.classList.remove("sliding");
+        canvas.style.width = PANEL + stage.clientWidth / view.scale + "px";
+        requestAnimationFrame(() => requestAnimationFrame(() => layout(true)));
+      } else {
+        // Slide back, then narrow the canvas to the screen.
+        canvas.classList.add("sliding");
+        canvas.style.transform = `translateX(0px) scale(${view.scale})`;
+        let done = false;
+        const finish = () => { if (!done) { done = true; layout(false); } };
+        canvas.addEventListener("transitionend", finish, { once: true });
+        setTimeout(finish, 400);
+      }
+    }
+
+    // Plain mouse-wheel steps, which the game turns into map zoom. egui sends
+    // wheel input to whatever is under the pointer, and a finger leaves no
+    // pointer behind, so hover the middle of the map first and leave after.
+    let leaveTimer = 0;
+    function zoom(direction) {
+      const rect = stage.getBoundingClientRect();
+      const mapLeft = showMap ? 0 : PANEL * view.scale;
+      const at = {
+        clientX: rect.left + (mapLeft + rect.width) / 2,
+        clientY: rect.top + rect.height / 2,
+        bubbles: true,
+        cancelable: true,
+      };
+      canvas.dispatchEvent(new MouseEvent("mousemove", at));
+      canvas.dispatchEvent(new WheelEvent("wheel", { ...at, deltaY: -120 * direction, deltaMode: 0 }));
+      clearTimeout(leaveTimer);
+      leaveTimer = setTimeout(() => canvas.dispatchEvent(new MouseEvent("mouseleave", at)), 1200);
+    }
+
+    function pressEnter() {
+      for (const type of ["keydown", "keyup"]) {
+        canvas.dispatchEvent(new KeyboardEvent(type, {
+          key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true,
+        }));
+      }
+    }
+
+    function showTip(text, ms) {
+      tip.textContent = text;
+      tip.classList.add("show");
+      setTimeout(() => tip.classList.remove("show"), ms);
+    }
+
+    // Keep taps on the overlay buttons away from the game underneath.
+    for (const button of document.querySelectorAll(".tool")) {
+      for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "click"]) {
+        button.addEventListener(type, (e) => e.stopPropagation());
+      }
+    }
+    toggle.addEventListener("click", () => setShowMap(!showMap));
+    document.getElementById("enter").addEventListener("click", pressEnter);
+    document.getElementById("zoom-in").addEventListener("click", () => zoom(1));
+    document.getElementById("zoom-out").addEventListener("click", () => zoom(-1));
+    ctrlButton.addEventListener("click", () => {
+      view.ctrl = !view.ctrl;
+      ctrlButton.setAttribute("aria-pressed", String(view.ctrl));
+      if (view.ctrl) showTip("Ctrl is held: lasso another area to add it.", 3000);
+    });
+    if (document.fullscreenEnabled) {
+      fullscreenButton.hidden = false;
+      fullscreenButton.addEventListener("click", () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen().catch(() => {});
+      });
+    }
+
+    // Stop the browser itself from zooming or scrolling the page.
+    document.addEventListener("gesturestart", (e) => e.preventDefault());
+    document.addEventListener("dblclick", (e) => e.preventDefault());
+
+    new ResizeObserver(() => layout(false)).observe(stage);
+    window.addEventListener("orientationchange", () => setTimeout(() => layout(false), 300));
+    layout(false);
+
+    init().then(() => {
+      document.body.classList.add("ready");
+      if (stage.clientWidth < NARROW) {
+        showTip("Tap “Map ▸” to see the map, or turn your phone sideways to see both.", 5000);
+      }
+    }).catch((e) => {
       document.querySelector("#loading span").textContent = "The game could not start: " + e;
     });
   </script>
